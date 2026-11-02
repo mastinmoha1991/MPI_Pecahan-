@@ -1,0 +1,156 @@
+/**
+ * Backend MPI Pecahan Biasa - Google Apps Script
+ * Sheet otomatis: "Data Soal" dan "Hasil".
+ *
+ * Deploy sebagai Web App:
+ * Execute as: Me
+ * Who has access: Anyone
+ *
+ * Catatan: Web App publik menerima kiriman dari pengunjung. Jangan menyimpan
+ * data pribadi sensitif. Untuk penggunaan sekolah, batasi data pada nama/kelas.
+ */
+
+const SHEET_SOAL = "Data Soal";
+const SHEET_HASIL = "Hasil";
+
+function doGet() {
+  return jsonOutput_({
+    status: "ok",
+    message: "Backend MPI Pecahan Biasa aktif.",
+    actions: ["syncQuestions", "saveResult"]
+  });
+}
+
+function doPost(e) {
+  try {
+    ensureSheets_();
+
+    let payload = {};
+    if (e && e.parameter && e.parameter.payload) {
+      payload = JSON.parse(e.parameter.payload);
+    } else if (e && e.postData && e.postData.contents) {
+      payload = JSON.parse(e.postData.contents);
+    }
+
+    let result;
+    switch (payload.action) {
+      case "syncQuestions":
+        result = syncQuestions_(payload.questions || []);
+        break;
+      case "saveResult":
+        result = saveResult_(payload);
+        break;
+      default:
+        throw new Error("Action tidak dikenal.");
+    }
+    return jsonOutput_({ status: "ok", result: result });
+  } catch (err) {
+    return jsonOutput_({ status: "error", message: String(err.message || err) });
+  }
+}
+
+function ensureSheets_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) throw new Error("Spreadsheet tidak ditemukan. Buat script dari Extensions > Apps Script pada Spreadsheet tujuan.");
+
+  let soal = ss.getSheetByName(SHEET_SOAL);
+  if (!soal) soal = ss.insertSheet(SHEET_SOAL);
+  const soalHeaders = [
+    "Menu", "Nomor", "Pertanyaan", "Pilihan A", "Pilihan B",
+    "Pilihan C", "Pilihan D", "Kunci Jawaban", "Terakhir Disinkronkan"
+  ];
+  ensureHeader_(soal, soalHeaders);
+
+  let hasil = ss.getSheetByName(SHEET_HASIL);
+  if (!hasil) hasil = ss.insertSheet(SHEET_HASIL);
+  const hasilHeaders = [
+    "Waktu Pengerjaan (Timestamp)", "Nama Siswa", "Kelas", "Menu",
+    "Jumlah Jawaban Benar", "Jumlah Jawaban Salah",
+    "Detail Inputan Jawaban Siswa untuk setiap soal"
+  ];
+  ensureHeader_(hasil, hasilHeaders);
+
+  [soal, hasil].forEach(sheet => {
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, sheet.getLastColumn()).setFontWeight("bold");
+    sheet.autoResizeColumns(1, sheet.getLastColumn());
+  });
+}
+
+function ensureHeader_(sheet, headers) {
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  } else {
+    const existing = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), headers.length))
+      .getValues()[0];
+    const missing = headers.some((header, i) => existing[i] !== header);
+    if (missing && sheet.getLastRow() === 1) {
+      sheet.clear();
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    } else if (missing) {
+      // Do not overwrite existing student records if a header was changed.
+      throw new Error('Header sheet "' + sheet.getName() + '" tidak sesuai. Periksa baris pertama.');
+    }
+  }
+}
+
+function syncQuestions_(questions) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_SOAL);
+  const now = new Date();
+  const headers = [
+    "Menu", "Nomor", "Pertanyaan", "Pilihan A", "Pilihan B",
+    "Pilihan C", "Pilihan D", "Kunci Jawaban", "Terakhir Disinkronkan"
+  ];
+  const rows = questions.map(q => [
+    safeCell_(q.menu), Number(q.nomor) || "", safeCell_(q.pertanyaan),
+    safeCell_(q.pilihanA), safeCell_(q.pilihanB), safeCell_(q.pilihanC),
+    safeCell_(q.pilihanD), safeCell_(q.kunciJawaban), now
+  ]);
+
+  // Replace the bank soal only; never touch the Hasil sheet.
+  if (sheet.getLastRow() > 1) {
+    sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).clearContent();
+  }
+  if (rows.length) {
+    sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+    sheet.getRange(2, 9, rows.length, 1).setNumberFormat("yyyy-mm-dd hh:mm:ss");
+  }
+  return { jumlahSoal: rows.length };
+}
+
+function saveResult_(p) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_HASIL);
+  const detail = Array.isArray(p.detailJawaban) ? p.detailJawaban : [];
+  const row = [
+    new Date(),
+    safeCell_(p.namaSiswa),
+    safeCell_(p.kelas),
+    safeCell_(p.menu),
+    Number(p.jumlahBenar) || 0,
+    Number(p.jumlahSalah) || 0,
+    JSON.stringify(detail)
+  ];
+  sheet.appendRow(row);
+  const r = sheet.getLastRow();
+  sheet.getRange(r, 1).setNumberFormat("yyyy-mm-dd hh:mm:ss");
+  sheet.getRange(r, 7).setWrap(true);
+  return { row: r };
+}
+
+function safeCell_(value) {
+  const s = value == null ? "" : String(value);
+  // Avoid user-submitted text being interpreted as a spreadsheet formula.
+  return /^[=+\-@]/.test(s) ? "'" + s : s;
+}
+
+function jsonOutput_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/** Jalankan sekali secara manual bila ingin membuat sheet sebelum deploy. */
+function siapkanDatabase() {
+  ensureSheets_();
+}
